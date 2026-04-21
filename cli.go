@@ -49,7 +49,7 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: notify start [--name <name>] \"<command>\" [--restart]")
+		return fmt.Errorf("usage: notify start [--name <name>] [--restart] \"<command>\"")
 	}
 	resolvedName := *name
 	if resolvedName == "" {
@@ -196,7 +196,7 @@ func writeRootHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "notify - react to notifications with shell commands")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] \"<command>\" [--restart]")
+	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] [--restart] \"<command>\"")
 	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] [--prefix \"<text>\"]")
 	_, _ = fmt.Fprintln(w, "  notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\"")
@@ -205,7 +205,7 @@ func writeRootHelp(w io.Writer) {
 
 func writeStartHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] \"<command>\" [--restart]")
+	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] [--restart] \"<command>\"")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Options:")
 	_, _ = fmt.Fprintln(w, "  --name <name>  set the instance name; otherwise a random name is generated")
