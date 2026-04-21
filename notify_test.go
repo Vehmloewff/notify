@@ -246,6 +246,25 @@ func TestSendWithoutNameFailsWhenMultipleInstancesExist(t *testing.T) {
 	}
 }
 
+func TestListShowsRunningInstances(t *testing.T) {
+	stderr := &lockedBuffer{}
+	nameA := uniqueName("list-a")
+	nameB := uniqueName("list-b")
+	stopA := startTestServer(t, nameA, "cat >/dev/null", false, stderr)
+	defer stopA()
+	stopB := startTestServer(t, nameB, "cat >/dev/null", false, stderr)
+	defer stopB()
+
+	var stdout bytes.Buffer
+	if err := executeCLI([]string{"list"}, strings.NewReader(""), &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, nameA+"\n") || !strings.Contains(out, nameB+"\n") {
+		t.Fatalf("expected list output to contain %q and %q, got %q", nameA, nameB, out)
+	}
+}
+
 func TestStartGeneratesRandomNameAndPrintsIt(t *testing.T) {
 	stderr := &lockedBuffer{}
 	var stdout bytes.Buffer

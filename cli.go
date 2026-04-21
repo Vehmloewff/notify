@@ -25,6 +25,8 @@ func executeCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 		return runStop(args[1:], stdout)
 	case "send":
 		return runSend(args[1:], stdin, stdout)
+	case "list":
+		return runList(args[1:], stdout)
 	default:
 		return usageError()
 	}
@@ -143,8 +145,33 @@ func runSend(args []string, stdin io.Reader, stdout io.Writer) error {
 	})
 }
 
+func runList(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	showHelp := fs.Bool("help", false, "show help")
+	fs.BoolVar(showHelp, "h", false, "show help")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *showHelp {
+		writeListHelp(stdout)
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: notify list")
+	}
+	instances, err := listLiveInstances()
+	if err != nil {
+		return err
+	}
+	for _, name := range instances {
+		_, _ = fmt.Fprintln(stdout, name)
+	}
+	return nil
+}
+
 func usageError() error {
-	return errors.New("usage: notify <start|stop|send> ...")
+	return errors.New("usage: notify <start|stop|send|list> ...")
 }
 
 func writeRootHelp(w io.Writer) {
@@ -155,6 +182,7 @@ func writeRootHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] [--prefix \"<text>\"]")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] --command \"<cmd>\" [--recursive] [--prefix \"<text>\"]")
+	_, _ = fmt.Fprintln(w, "  notify list")
 }
 
 func writeStartHelp(w io.Writer) {
@@ -171,6 +199,13 @@ func writeStopHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "If --name is omitted and exactly one instance is running, that instance is used.")
+}
+
+func writeListHelp(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  notify list")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Print all running instance names, one per line.")
 }
 
 func writeSendHelp(w io.Writer) {
