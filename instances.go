@@ -16,11 +16,11 @@ func randomInstanceName() (string, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	return "notify-" + hex.EncodeToString(buf), nil
+	return hex.EncodeToString(buf), nil
 }
 
 func listLiveInstances() ([]string, error) {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "notify-*.sock"))
+	matches, err := filepath.Glob(filepath.Join(socketDir(), "*.sock"))
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +67,10 @@ func resolveTargetName(explicit string) (string, error) {
 
 func instanceNameFromSocketPath(path string) (string, bool) {
 	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "notify-") || !strings.HasSuffix(base, ".sock") {
+	if !strings.HasSuffix(base, ".sock") {
 		return "", false
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(base, "notify-"), ".sock")
+	name := strings.TrimSuffix(base, ".sock")
 	if name == "" {
 		return "", false
 	}

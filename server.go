@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"syscall"
 )
@@ -161,6 +162,9 @@ func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notifica
 
 func prepareListener(name string) (*net.UnixListener, error) {
 	path := socketPath(name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create socket directory: %w", err)
+	}
 	if _, err := os.Stat(path); err == nil {
 		conn, dialErr := net.Dial("unix", path)
 		if dialErr == nil {
@@ -188,5 +192,18 @@ func prepareListener(name string) (*net.UnixListener, error) {
 }
 
 func socketPath(name string) string {
-	return filepath.Join(os.TempDir(), "notify-"+name+".sock")
+	return filepath.Join(socketDir(), name+".sock")
+}
+
+func socketDir() string {
+	username := os.Getenv("USER")
+	if username == "" {
+		if currentUser, err := user.Current(); err == nil && currentUser.Username != "" {
+			username = currentUser.Username
+		}
+	}
+	if username == "" {
+		username = "unknown"
+	}
+	return filepath.Join(os.TempDir(), "notify-"+username)
 }

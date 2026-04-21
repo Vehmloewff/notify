@@ -416,7 +416,7 @@ func waitForPrintedName(t *testing.T, stdout *bytes.Buffer) string {
 }
 
 func uniqueName(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	return fmt.Sprintf("%s-%x", prefix, uint32(time.Now().UnixNano()))
 }
 
 func shellQuote(s string) string {
