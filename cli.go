@@ -25,6 +25,8 @@ func executeCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 		return runStop(args[1:], stdout)
 	case "send":
 		return runSend(args[1:], stdin, stdout)
+	case "command":
+		return runCommand(args[1:], stdout)
 	case "list":
 		return runList(args[1:], stdout)
 	default:
@@ -104,8 +106,6 @@ func runSend(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "instance name")
 	prefix := fs.String("prefix", "", "literal prefix to prepend to notification")
-	command := fs.String("command", "", "shell command whose stdout will be sent")
-	recursive := fs.Bool("recursive", false, "repeat command until 3 consecutive failures")
 	showHelp := fs.Bool("help", false, "show help")
 	fs.BoolVar(showHelp, "h", false, "show help")
 	if err := fs.Parse(args); err != nil {
@@ -123,23 +123,41 @@ func runSend(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 
-	if *command == "" {
-		if *recursive {
-			return fmt.Errorf("--recursive requires --command")
-		}
-		body, err := io.ReadAll(stdin)
-		if err != nil {
-			return err
-		}
-		payload, err := preparePayload(*prefix, body)
-		if err != nil {
-			return err
-		}
-		return sendNotification(resolvedName, notification{stdin: payload})
+	body, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
 	}
+	payload, err := preparePayload(*prefix, body)
+	if err != nil {
+		return err
+	}
+	return sendNotification(resolvedName, notification{stdin: payload})
+}
 
+func runCommand(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("command", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "instance name")
+	prefix := fs.String("prefix", "", "literal prefix to prepend to notification")
+	recursive := fs.Bool("recursive", false, "repeat command until 3 consecutive failures")
+	showHelp := fs.Bool("help", false, "show help")
+	fs.BoolVar(showHelp, "h", false, "show help")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *showHelp {
+		writeCommandHelp(stdout)
+		return nil
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\"")
+	}
+	resolvedName, err := resolveTargetName(*name)
+	if err != nil {
+		return err
+	}
 	return sendCommandRequest(resolvedName, commandRequest{
-		command:   *command,
+		command:   fs.Arg(0),
 		prefix:    *prefix,
 		recursive: *recursive,
 	})
@@ -171,7 +189,7 @@ func runList(args []string, stdout io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: notify <start|stop|send|list> ...")
+	return errors.New("usage: notify <start|stop|send|command|list> ...")
 }
 
 func writeRootHelp(w io.Writer) {
@@ -181,7 +199,7 @@ func writeRootHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] \"<command>\" [--restart]")
 	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] [--prefix \"<text>\"]")
-	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] --command \"<cmd>\" [--recursive] [--prefix \"<text>\"]")
+	_, _ = fmt.Fprintln(w, "  notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\"")
 	_, _ = fmt.Fprintln(w, "  notify list")
 }
 
@@ -211,12 +229,19 @@ func writeListHelp(w io.Writer) {
 func writeSendHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] [--prefix \"<text>\"]")
-	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] --command \"<cmd>\" [--recursive] [--prefix \"<text>\"]")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Options:")
 	_, _ = fmt.Fprintln(w, "  --name <name>      target a specific instance; optional if exactly one instance is running")
 	_, _ = fmt.Fprintln(w, "  --prefix <text>    prepend literal text to the notification payload")
-	_, _ = fmt.Fprintln(w, "  --command <cmd>    ask the running instance to execute a shell command")
+}
+
+func writeCommandHelp(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\"")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Options:")
+	_, _ = fmt.Fprintln(w, "  --name <name>      target a specific instance; optional if exactly one instance is running")
+	_, _ = fmt.Fprintln(w, "  --prefix <text>    prepend literal text to the notification payload")
 	_, _ = fmt.Fprintln(w, "  --recursive        repeat the command until 3 consecutive failures")
 }
 

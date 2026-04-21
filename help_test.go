@@ -12,7 +12,7 @@ func TestRootHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "notify start [--name <name>]") || !strings.Contains(out, "notify send [--name <name>]") || !strings.Contains(out, "notify list") {
+	if !strings.Contains(out, "notify start [--name <name>]") || !strings.Contains(out, "notify send [--name <name>]") || !strings.Contains(out, "notify command [--name <name>] [--recursive]") || !strings.Contains(out, "notify list") {
 		t.Fatalf("unexpected help output: %q", out)
 	}
 }
@@ -25,6 +25,7 @@ func TestSubcommandHelp(t *testing.T) {
 		{args: []string{"start", "--help"}, want: "notify start [--name <name>]"},
 		{args: []string{"stop", "--help"}, want: "notify stop [--name <name>]"},
 		{args: []string{"send", "--help"}, want: "notify send [--name <name>]"},
+		{args: []string{"command", "--help"}, want: "notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\""},
 		{args: []string{"list", "--help"}, want: "notify list"},
 	}
 

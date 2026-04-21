@@ -147,7 +147,7 @@ func TestSendCommandForwardsStderrToInstanceStderr(t *testing.T) {
 	stopServer := startTestServer(t, name, "cat >/dev/null", false, stderr)
 	defer stopServer()
 
-	err := executeCLI([]string{"send", "--name", name, "--command", "printf data; printf warn >&2"}, strings.NewReader(""), io.Discard, io.Discard)
+	err := executeCLI([]string{"command", "--name", name, "printf data; printf warn >&2"}, strings.NewReader(""), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,12 +164,12 @@ func TestSendCommandIsFireAndForget(t *testing.T) {
 	defer stopServer()
 
 	started := time.Now()
-	err := executeCLI([]string{"send", "--name", name, "--command", "sleep 1; printf done"}, strings.NewReader(""), io.Discard, io.Discard)
+	err := executeCLI([]string{"command", "--name", name, "sleep 1; printf done"}, strings.NewReader(""), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("send --command blocked too long: %v", elapsed)
+		t.Fatalf("command --command blocked too long: %v", elapsed)
 	}
 	waitForContains(t, outFile, "done\n")
 }
@@ -183,7 +183,7 @@ func TestRecursiveModeStopsAfterThreeConsecutiveFailures(t *testing.T) {
 	stopServer := startTestServer(t, name, command, false, stderr)
 	defer stopServer()
 
-	err := executeCLI([]string{"send", "--name", name, "--command", "printf loop; exit 1", "--recursive"}, strings.NewReader(""), io.Discard, io.Discard)
+	err := executeCLI([]string{"command", "--name", name, "--recursive", "printf loop; exit 1"}, strings.NewReader(""), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
