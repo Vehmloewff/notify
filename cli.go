@@ -178,12 +178,19 @@ func runList(args []string, stdout io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: notify list")
 	}
-	instances, err := listLiveInstances()
+	statuses, err := listInstanceStatuses()
 	if err != nil {
 		return err
 	}
-	for _, name := range instances {
-		_, _ = fmt.Fprintln(stdout, name)
+	for _, status := range statuses {
+		_, _ = fmt.Fprintln(stdout, status.Name)
+		for _, pending := range status.PendingCommands {
+			line := fmt.Sprintf("  - %s", pending.Command)
+			if pending.Recursive {
+				line += " (recursive)"
+			}
+			_, _ = fmt.Fprintln(stdout, line)
+		}
 	}
 	return nil
 }
@@ -223,7 +230,7 @@ func writeListHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  notify list")
 	_, _ = fmt.Fprintln(w, "")
-	_, _ = fmt.Fprintln(w, "Print all running instance names, one per line.")
+	_, _ = fmt.Fprintln(w, "Print all running instances and their pending command requests.")
 }
 
 func writeSendHelp(w io.Writer) {

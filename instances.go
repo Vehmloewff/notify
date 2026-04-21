@@ -43,6 +43,23 @@ func listLiveInstances() ([]string, error) {
 	return instances, nil
 }
 
+func listInstanceStatuses() ([]instanceStatus, error) {
+	instances, err := listLiveInstances()
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := make([]instanceStatus, 0, len(instances))
+	for _, name := range instances {
+		status, err := queryInstanceStatus(name)
+		if err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
 func resolveTargetName(explicit string) (string, error) {
 	if explicit != "" {
 		if err := validateName(explicit); err != nil {

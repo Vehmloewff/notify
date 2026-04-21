@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"syscall"
 )
 
@@ -19,6 +20,10 @@ type server struct {
 	restart bool
 	stdout  io.Writer
 	stderr  io.Writer
+}
+
+type statusRequest struct {
+	response chan instanceStatus
 }
 
 func (s *server) run() error {
@@ -37,19 +42,35 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 
 	incoming := make(chan notification)
 	commandRequests := make(chan commandRequest)
+	statusRequests := make(chan statusRequest)
+	commandCompletions := make(chan uint64)
 	stopRequests := make(chan struct{}, 1)
 	acceptErrs := make(chan error, 1)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
-	go s.acceptLoop(listener, incoming, commandRequests, stopRequests, acceptErrs)
+	go s.acceptLoop(listener, incoming, commandRequests, statusRequests, stopRequests, acceptErrs)
 
 	var queue []notification
 	var currentCmd *exec.Cmd
 	var currentDone <-chan error
 	terminating := false
 	shuttingDown := false
+	type pendingCommand struct {
+		id     uint64
+		status pendingCommandStatus
+	}
+	var pendingCommands []pendingCommand
+	nextPendingID := uint64(1)
+
+	currentStatus := func() instanceStatus {
+		status := instanceStatus{Name: s.name, PendingCommands: make([]pendingCommandStatus, 0, len(pendingCommands))}
+		for _, pending := range pendingCommands {
+			status.PendingCommands = append(status.PendingCommands, pending.status)
+		}
+		return status
+	}
 
 	startNext := func() error {
 		if shuttingDown || currentCmd != nil || len(queue) == 0 {
@@ -86,9 +107,25 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 				_ = terminateProcess(currentCmd)
 			}
 		case req := <-commandRequests:
-			go runCommandRequestLoop(req, func(n notification) {
-				incoming <- n
-			})
+			pendingID := nextPendingID
+			nextPendingID++
+			pendingCommands = append(pendingCommands, pendingCommand{id: pendingID, status: pendingCommandStatus{Command: req.command, Recursive: req.recursive}})
+			go func(id uint64, req commandRequest) {
+				runCommandRequestLoop(req, func(n notification) {
+					incoming <- n
+				})
+				commandCompletions <- id
+			}(pendingID, req)
+		case req := <-statusRequests:
+			req.response <- currentStatus()
+		case pendingID := <-commandCompletions:
+			for i, pending := range pendingCommands {
+				if pending.id != pendingID {
+					continue
+				}
+				pendingCommands = slices.Delete(pendingCommands, i, i+1)
+				break
+			}
 		case <-stopRequests:
 			shuttingDown = true
 			_ = listener.Close()
@@ -117,46 +154,79 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 	}
 }
 
-func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notification, commandRequests chan<- commandRequest, stopRequests chan<- struct{}, acceptErrs chan<- error) {
+func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- struct{}, acceptErrs chan<- error) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			acceptErrs <- err
 			return
 		}
-		messageType, body, err := readFrame(conn)
-		_ = conn.Close()
+		go s.handleConn(conn, incoming, commandRequests, statusRequests, stopRequests, acceptErrs)
+	}
+}
+
+func (s *server) handleConn(conn net.Conn, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- struct{}, acceptErrs chan<- error) {
+	defer conn.Close()
+
+	req, err := readJSONRPCRequest(conn)
+	if err != nil {
+		_ = writeJSONRPCResponse(conn, makeErrorResponse(0, -32700, fmt.Sprintf("failed to read request: %v", err)))
+		return
+	}
+
+	var resp rpcResponse
+	switch req.Method {
+	case methodSend:
+		n, err := decodeSendParams(req.Params)
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				continue
-			}
-			acceptErrs <- fmt.Errorf("failed to read message: %w", err)
+			resp = makeErrorResponse(req.ID, -32602, fmt.Sprintf("invalid send params: %v", err))
+			break
+		}
+		incoming <- n
+		resp, err = makeSuccessResponse(req.ID, sendResult{})
+		if err != nil {
+			acceptErrs <- err
 			return
 		}
-		switch messageType {
-		case messageTypeNotification:
-			n, err := decodeNotification(body)
-			if err != nil {
-				acceptErrs <- err
-				return
-			}
-			incoming <- n
-		case messageTypeCommandRequest:
-			req, err := decodeCommandRequest(body)
-			if err != nil {
-				acceptErrs <- err
-				return
-			}
-			commandRequests <- req
-		case messageTypeStop:
-			select {
-			case stopRequests <- struct{}{}:
-			default:
-			}
+	case methodCommand:
+		commandReq, err := decodeCommandParams(req.Params)
+		if err != nil {
+			resp = makeErrorResponse(req.ID, -32602, fmt.Sprintf("invalid command params: %v", err))
+			break
+		}
+		commandRequests <- commandReq
+		resp, err = makeSuccessResponse(req.ID, commandResultAck{})
+		if err != nil {
+			acceptErrs <- err
+			return
+		}
+	case methodStop:
+		select {
+		case stopRequests <- struct{}{}:
 		default:
-			acceptErrs <- fmt.Errorf("unknown message type: %d", messageType)
+		}
+		var err error
+		resp, err = makeSuccessResponse(req.ID, stopResult{})
+		if err != nil {
+			acceptErrs <- err
 			return
 		}
+	case methodStatus:
+		request := statusRequest{response: make(chan instanceStatus, 1)}
+		statusRequests <- request
+		status := <-request.response
+		var err error
+		resp, err = makeSuccessResponse(req.ID, status)
+		if err != nil {
+			acceptErrs <- err
+			return
+		}
+	default:
+		resp = makeErrorResponse(req.ID, -32601, fmt.Sprintf("unknown method %q", req.Method))
+	}
+
+	if err := writeJSONRPCResponse(conn, resp); err != nil {
+		acceptErrs <- fmt.Errorf("failed to write response: %w", err)
 	}
 }
 

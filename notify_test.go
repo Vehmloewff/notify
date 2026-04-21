@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -56,43 +57,59 @@ func TestPreparePayloadTruncatesAndPersistsFullPayload(t *testing.T) {
 
 func TestProtocolRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	original := notification{stdin: []byte("hello\x00world"), forwardedStderr: []byte("warn\n")}
-	if err := writeNotification(&buf, original); err != nil {
-		t.Fatal(err)
-	}
-	msgType, body, err := readFrame(&buf)
+	params := sendParams{Stdin: []byte("hello\x00world"), ForwardedStderr: []byte("warn\n")}
+	paramsBody, err := json.Marshal(params)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msgType != messageTypeNotification {
-		t.Fatalf("got type %d", msgType)
+	if err := writeJSONRPCRequest(&buf, rpcRequest{ID: 7, Method: methodSend, Params: paramsBody}); err != nil {
+		t.Fatal(err)
 	}
-	decoded, err := decodeNotification(body)
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Fatalf("expected newline-delimited request, got %q", buf.String())
+	}
+	decodedReq, err := readJSONRPCRequest(&buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(decoded.stdin, original.stdin) || !bytes.Equal(decoded.forwardedStderr, original.forwardedStderr) {
-		t.Fatalf("decoded notification mismatch: %#v != %#v", decoded, original)
+	if decodedReq.ID != 7 || decodedReq.Method != methodSend {
+		t.Fatalf("unexpected request: %#v", decodedReq)
+	}
+	decodedNotification, err := decodeSendParams(decodedReq.Params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decodedNotification.stdin, params.Stdin) || !bytes.Equal(decodedNotification.forwardedStderr, params.ForwardedStderr) {
+		t.Fatalf("decoded notification mismatch: %#v", decodedNotification)
 	}
 
 	buf.Reset()
-	request := commandRequest{command: "printf hi", prefix: "pre-", recursive: true}
-	if err := writeCommandRequest(&buf, request); err != nil {
-		t.Fatal(err)
-	}
-	msgType, body, err = readFrame(&buf)
+	response, err := makeSuccessResponse(7, instanceStatus{
+		Name:            "demo",
+		PendingCommands: []pendingCommandStatus{{Command: "printf hi", Recursive: true}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msgType != messageTypeCommandRequest {
-		t.Fatalf("got type %d", msgType)
+	if err := writeJSONRPCResponse(&buf, response); err != nil {
+		t.Fatal(err)
 	}
-	decodedRequest, err := decodeCommandRequest(body)
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Fatalf("expected newline-delimited response, got %q", buf.String())
+	}
+	decodedResp, err := readJSONRPCResponse(&buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decodedRequest != request {
-		t.Fatalf("decoded command request mismatch: %#v != %#v", decodedRequest, request)
+	if decodedResp.ID != 7 {
+		t.Fatalf("unexpected response id: %d", decodedResp.ID)
+	}
+	var status instanceStatus
+	if err := json.Unmarshal(decodedResp.Result, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Name != "demo" || len(status.PendingCommands) != 1 || status.PendingCommands[0].Command != "printf hi" || !status.PendingCommands[0].Recursive {
+		t.Fatalf("decoded status mismatch: %#v", status)
 	}
 }
 
@@ -265,6 +282,37 @@ func TestListShowsRunningInstances(t *testing.T) {
 	}
 }
 
+func TestListShowsPendingCommandsPerInstance(t *testing.T) {
+	stderr := &lockedBuffer{}
+	name := uniqueName("list-pending")
+	stopServer := startTestServer(t, name, "cat >/dev/null", false, stderr)
+	defer stopServer()
+
+	if err := executeCLI([]string{"command", "--name", name, "sleep 2; printf done"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := executeCLI([]string{"command", "--name", name, "--recursive", "sleep 2; exit 1"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForPendingCommands(t, name, 2)
+
+	var stdout bytes.Buffer
+	if err := executeCLI([]string{"list"}, strings.NewReader(""), &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, name+"\n") {
+		t.Fatalf("expected list output to contain instance %q, got %q", name, out)
+	}
+	if !strings.Contains(out, "  - sleep 2; printf done\n") {
+		t.Fatalf("expected list output to contain non-recursive pending command, got %q", out)
+	}
+	if !strings.Contains(out, "  - sleep 2; exit 1 (recursive)\n") {
+		t.Fatalf("expected list output to contain recursive pending command, got %q", out)
+	}
+}
+
 func TestStartGeneratesRandomNameAndPrintsIt(t *testing.T) {
 	stderr := &lockedBuffer{}
 	var stdout bytes.Buffer
@@ -399,6 +447,23 @@ func waitForBufferContains(t *testing.T, buf *lockedBuffer, want string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("buffer never contained %q; got %q", want, buf.String())
+}
+
+func waitForPendingCommands(t *testing.T, name string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := queryInstanceStatus(name)
+		if err == nil && len(status.PendingCommands) >= want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	status, err := queryInstanceStatus(name)
+	if err != nil {
+		t.Fatalf("failed reading status for %q: %v", name, err)
+	}
+	t.Fatalf("instance %q never reached %d pending commands; got %d", name, want, len(status.PendingCommands))
 }
 
 func waitForPrintedName(t *testing.T, stdout *bytes.Buffer) string {

@@ -1,16 +1,18 @@
 package main
 
 import (
-	"bufio"
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 )
 
+const jsonRPCVersion = "2.0"
+
 const (
-	messageTypeNotification   uint32 = 1
-	messageTypeStop           uint32 = 2
-	messageTypeCommandRequest uint32 = 3
+	methodSend    = "notify.send"
+	methodStop    = "notify.stop"
+	methodCommand = "notify.command"
+	methodStatus  = "notify.status"
 )
 
 type notification struct {
@@ -24,95 +26,122 @@ type commandRequest struct {
 	recursive bool
 }
 
-func writeNotification(w io.Writer, n notification) error {
-	body := make([]byte, 8+len(n.stdin)+len(n.forwardedStderr))
-	binary.BigEndian.PutUint32(body[0:4], uint32(len(n.stdin)))
-	binary.BigEndian.PutUint32(body[4:8], uint32(len(n.forwardedStderr)))
-	copy(body[8:], n.stdin)
-	copy(body[8+len(n.stdin):], n.forwardedStderr)
-	return writeFrame(w, messageTypeNotification, body)
+type pendingCommandStatus struct {
+	Command   string `json:"command"`
+	Recursive bool   `json:"recursive"`
 }
 
-func writeStop(w io.Writer) error {
-	return writeFrame(w, messageTypeStop, nil)
+type instanceStatus struct {
+	Name            string                 `json:"name"`
+	PendingCommands []pendingCommandStatus `json:"pendingCommands"`
 }
 
-func writeCommandRequest(w io.Writer, req commandRequest) error {
-	commandBytes := []byte(req.command)
-	prefixBytes := []byte(req.prefix)
-	body := make([]byte, 9+len(commandBytes)+len(prefixBytes))
-	binary.BigEndian.PutUint32(body[0:4], uint32(len(commandBytes)))
-	binary.BigEndian.PutUint32(body[4:8], uint32(len(prefixBytes)))
-	if req.recursive {
-		body[8] = 1
-	}
-	copy(body[9:], commandBytes)
-	copy(body[9+len(commandBytes):], prefixBytes)
-	return writeFrame(w, messageTypeCommandRequest, body)
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      uint64          `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-func writeFrame(w io.Writer, messageType uint32, body []byte) error {
-	header := make([]byte, 8)
-	binary.BigEndian.PutUint32(header[0:4], messageType)
-	binary.BigEndian.PutUint32(header[4:8], uint32(len(body)))
-	if _, err := w.Write(header); err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	_, err := w.Write(body)
-	return err
+type rpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      uint64          `json:"id,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
 }
 
-func readFrame(r io.Reader) (uint32, []byte, error) {
-	br := bufio.NewReader(r)
-	header := make([]byte, 8)
-	if _, err := io.ReadFull(br, header); err != nil {
-		return 0, nil, err
-	}
-	messageType := binary.BigEndian.Uint32(header[0:4])
-	length := binary.BigEndian.Uint32(header[4:8])
-	body := make([]byte, length)
-	if _, err := io.ReadFull(br, body); err != nil {
-		return 0, nil, err
-	}
-	return messageType, body, nil
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
-func decodeNotification(body []byte) (notification, error) {
-	if len(body) < 8 {
-		return notification{}, fmt.Errorf("notification body too short")
-	}
-	stdinLen := binary.BigEndian.Uint32(body[0:4])
-	stderrLen := binary.BigEndian.Uint32(body[4:8])
-	expected := 8 + int(stdinLen) + int(stderrLen)
-	if len(body) != expected {
-		return notification{}, fmt.Errorf("notification body length mismatch")
-	}
-	stdinStart := 8
-	stderrStart := stdinStart + int(stdinLen)
-	return notification{
-		stdin:           append([]byte(nil), body[stdinStart:stderrStart]...),
-		forwardedStderr: append([]byte(nil), body[stderrStart:]...),
-	}, nil
+type sendParams struct {
+	Stdin           []byte `json:"stdin,omitempty"`
+	ForwardedStderr []byte `json:"forwardedStderr,omitempty"`
 }
 
-func decodeCommandRequest(body []byte) (commandRequest, error) {
-	if len(body) < 9 {
-		return commandRequest{}, fmt.Errorf("command request body too short")
+type commandParams struct {
+	Command   string `json:"command"`
+	Prefix    string `json:"prefix,omitempty"`
+	Recursive bool   `json:"recursive,omitempty"`
+}
+
+type stopResult struct{}
+
+type sendResult struct{}
+
+type commandResultAck struct{}
+
+func writeJSONRPCRequest(w io.Writer, req rpcRequest) error {
+	if req.JSONRPC == "" {
+		req.JSONRPC = jsonRPCVersion
 	}
-	commandLen := binary.BigEndian.Uint32(body[0:4])
-	prefixLen := binary.BigEndian.Uint32(body[4:8])
-	expected := 9 + int(commandLen) + int(prefixLen)
-	if len(body) != expected {
-		return commandRequest{}, fmt.Errorf("command request body length mismatch")
+	return json.NewEncoder(w).Encode(req)
+}
+
+func readJSONRPCRequest(r io.Reader) (rpcRequest, error) {
+	var req rpcRequest
+	if err := json.NewDecoder(r).Decode(&req); err != nil {
+		return rpcRequest{}, err
 	}
-	commandStart := 9
-	prefixStart := commandStart + int(commandLen)
-	return commandRequest{
-		command:   string(body[commandStart:prefixStart]),
-		prefix:    string(body[prefixStart:]),
-		recursive: body[8] == 1,
-	}, nil
+	if req.JSONRPC != jsonRPCVersion {
+		return rpcRequest{}, fmt.Errorf("unsupported jsonrpc version %q", req.JSONRPC)
+	}
+	if req.Method == "" {
+		return rpcRequest{}, fmt.Errorf("missing method")
+	}
+	return req, nil
+}
+
+func writeJSONRPCResponse(w io.Writer, resp rpcResponse) error {
+	if resp.JSONRPC == "" {
+		resp.JSONRPC = jsonRPCVersion
+	}
+	return json.NewEncoder(w).Encode(resp)
+}
+
+func readJSONRPCResponse(r io.Reader) (rpcResponse, error) {
+	var resp rpcResponse
+	if err := json.NewDecoder(r).Decode(&resp); err != nil {
+		return rpcResponse{}, err
+	}
+	if resp.JSONRPC != jsonRPCVersion {
+		return rpcResponse{}, fmt.Errorf("unsupported jsonrpc version %q", resp.JSONRPC)
+	}
+	return resp, nil
+}
+
+func makeSuccessResponse(id uint64, result any) (rpcResponse, error) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return rpcResponse{}, err
+	}
+	return rpcResponse{JSONRPC: jsonRPCVersion, ID: id, Result: body}, nil
+}
+
+func makeErrorResponse(id uint64, code int, message string) rpcResponse {
+	return rpcResponse{
+		JSONRPC: jsonRPCVersion,
+		ID:      id,
+		Error:   &rpcError{Code: code, Message: message},
+	}
+}
+
+func decodeSendParams(raw json.RawMessage) (notification, error) {
+	var params sendParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return notification{}, err
+	}
+	return notification{stdin: params.Stdin, forwardedStderr: params.ForwardedStderr}, nil
+}
+
+func decodeCommandParams(raw json.RawMessage) (commandRequest, error) {
+	var params commandParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return commandRequest{}, err
+	}
+	if params.Command == "" {
+		return commandRequest{}, fmt.Errorf("missing command")
+	}
+	return commandRequest{command: params.Command, prefix: params.Prefix, recursive: params.Recursive}, nil
 }
