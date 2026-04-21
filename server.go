@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,11 @@ type statusRequest struct {
 	response chan instanceStatus
 }
 
+type stopRequest struct {
+	commandID uint64
+	response  chan error
+}
+
 func (s *server) run() error {
 	listener, err := prepareListener(s.name)
 	if err != nil {
@@ -44,7 +50,7 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 	commandRequests := make(chan commandRequest)
 	statusRequests := make(chan statusRequest)
 	commandCompletions := make(chan uint64)
-	stopRequests := make(chan struct{}, 1)
+	stopRequests := make(chan stopRequest)
 	acceptErrs := make(chan error, 1)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -60,6 +66,7 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 	type pendingCommand struct {
 		id     uint64
 		status pendingCommandStatus
+		cancel context.CancelFunc
 	}
 	var pendingCommands []pendingCommand
 	nextPendingID := uint64(1)
@@ -88,6 +95,17 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 		return nil
 	}
 
+	removePendingCommand := func(id uint64) bool {
+		for i, pending := range pendingCommands {
+			if pending.id != id {
+				continue
+			}
+			pendingCommands = slices.Delete(pendingCommands, i, i+1)
+			return true
+		}
+		return false
+	}
+
 	for {
 		if err := startNext(); err != nil {
 			return err
@@ -109,30 +127,51 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 		case req := <-commandRequests:
 			pendingID := nextPendingID
 			nextPendingID++
-			pendingCommands = append(pendingCommands, pendingCommand{id: pendingID, status: pendingCommandStatus{Command: req.command, Recursive: req.recursive}})
+			ctx, cancel := context.WithCancel(context.Background())
+			pendingCommands = append(pendingCommands, pendingCommand{
+				id:     pendingID,
+				status: pendingCommandStatus{ID: pendingID, Command: req.command, Recursive: req.recursive},
+				cancel: cancel,
+			})
+			if req.response != nil {
+				req.response <- pendingID
+			}
 			go func(id uint64, req commandRequest) {
-				runCommandRequestLoop(req, func(n notification) {
+				defer func() { commandCompletions <- id }()
+				runCommandRequestLoop(ctx, req, func(n notification) {
 					incoming <- n
 				})
-				commandCompletions <- id
 			}(pendingID, req)
 		case req := <-statusRequests:
 			req.response <- currentStatus()
 		case pendingID := <-commandCompletions:
+			removePendingCommand(pendingID)
+		case req := <-stopRequests:
+			if req.commandID == 0 {
+				shuttingDown = true
+				for _, pending := range pendingCommands {
+					pending.cancel()
+				}
+				_ = listener.Close()
+				if currentCmd != nil && !terminating {
+					terminating = true
+					_ = terminateProcess(currentCmd)
+				}
+				req.response <- nil
+				continue
+			}
+
+			var stopErr error = fmt.Errorf("pending command %d not found", req.commandID)
 			for i, pending := range pendingCommands {
-				if pending.id != pendingID {
+				if pending.id != req.commandID {
 					continue
 				}
+				pending.cancel()
 				pendingCommands = slices.Delete(pendingCommands, i, i+1)
+				stopErr = nil
 				break
 			}
-		case <-stopRequests:
-			shuttingDown = true
-			_ = listener.Close()
-			if currentCmd != nil && !terminating {
-				terminating = true
-				_ = terminateProcess(currentCmd)
-			}
+			req.response <- stopErr
 		case sigErr := <-acceptErrs:
 			if shuttingDown && errors.Is(sigErr, net.ErrClosed) {
 				continue
@@ -140,6 +179,9 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 			return sigErr
 		case <-signals:
 			shuttingDown = true
+			for _, pending := range pendingCommands {
+				pending.cancel()
+			}
 			_ = listener.Close()
 			if currentCmd != nil && !terminating {
 				terminating = true
@@ -154,7 +196,7 @@ func (s *server) runWithListener(listener *net.UnixListener) error {
 	}
 }
 
-func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- struct{}, acceptErrs chan<- error) {
+func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- stopRequest, acceptErrs chan<- error) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -165,7 +207,7 @@ func (s *server) acceptLoop(listener *net.UnixListener, incoming chan<- notifica
 	}
 }
 
-func (s *server) handleConn(conn net.Conn, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- struct{}, acceptErrs chan<- error) {
+func (s *server) handleConn(conn net.Conn, incoming chan<- notification, commandRequests chan<- commandRequest, statusRequests chan<- statusRequest, stopRequests chan<- stopRequest, acceptErrs chan<- error) {
 	defer conn.Close()
 
 	req, err := readJSONRPCRequest(conn)
@@ -194,18 +236,26 @@ func (s *server) handleConn(conn net.Conn, incoming chan<- notification, command
 			resp = makeErrorResponse(req.ID, -32602, fmt.Sprintf("invalid command params: %v", err))
 			break
 		}
+		commandReq.response = make(chan uint64, 1)
 		commandRequests <- commandReq
-		resp, err = makeSuccessResponse(req.ID, commandResultAck{})
+		ack := commandResultAck{ID: <-commandReq.response}
+		resp, err = makeSuccessResponse(req.ID, ack)
 		if err != nil {
 			acceptErrs <- err
 			return
 		}
 	case methodStop:
-		select {
-		case stopRequests <- struct{}{}:
-		default:
+		params, err := decodeStopParams(req.Params)
+		if err != nil {
+			resp = makeErrorResponse(req.ID, -32602, fmt.Sprintf("invalid stop params: %v", err))
+			break
 		}
-		var err error
+		request := stopRequest{commandID: params.CommandID, response: make(chan error, 1)}
+		stopRequests <- request
+		if err := <-request.response; err != nil {
+			resp = makeErrorResponse(req.ID, -32602, err.Error())
+			break
+		}
 		resp, err = makeSuccessResponse(req.ID, stopResult{})
 		if err != nil {
 			acceptErrs <- err

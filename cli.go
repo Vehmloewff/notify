@@ -82,6 +82,7 @@ func runStop(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	name := fs.String("name", "", "instance name")
+	commandID := fs.Uint64("command", 0, "pending command id to stop")
 	showHelp := fs.Bool("help", false, "show help")
 	fs.BoolVar(showHelp, "h", false, "show help")
 	if err := fs.Parse(args); err != nil {
@@ -92,13 +93,13 @@ func runStop(args []string, stdout io.Writer) error {
 		return nil
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: notify stop [--name <name>]")
+		return fmt.Errorf("usage: notify stop [--name <name>] [--command <id>]")
 	}
 	resolvedName, err := resolveTargetName(*name)
 	if err != nil {
 		return err
 	}
-	return sendStop(resolvedName)
+	return sendStop(resolvedName, *commandID)
 }
 
 func runSend(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -156,11 +157,12 @@ func runCommand(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return sendCommandRequest(resolvedName, commandRequest{
+	_, err = sendCommandRequest(resolvedName, commandRequest{
 		command:   fs.Arg(0),
 		prefix:    *prefix,
 		recursive: *recursive,
 	})
+	return err
 }
 
 func runList(args []string, stdout io.Writer) error {
@@ -185,7 +187,7 @@ func runList(args []string, stdout io.Writer) error {
 	for _, status := range statuses {
 		_, _ = fmt.Fprintln(stdout, status.Name)
 		for _, pending := range status.PendingCommands {
-			line := fmt.Sprintf("  - %s", pending.Command)
+			line := fmt.Sprintf("  - [%d] %s", pending.ID, pending.Command)
 			if pending.Recursive {
 				line += " (recursive)"
 			}
@@ -204,7 +206,7 @@ func writeRootHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  notify start [--name <name>] [--restart] \"<command>\"")
-	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
+	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>] [--command <id>]")
 	_, _ = fmt.Fprintln(w, "  notify send [--name <name>] [--prefix \"<text>\"]")
 	_, _ = fmt.Fprintln(w, "  notify command [--name <name>] [--recursive] [--prefix \"<text>\"] \"<cmd>\"")
 	_, _ = fmt.Fprintln(w, "  notify list")
@@ -221,9 +223,11 @@ func writeStartHelp(w io.Writer) {
 
 func writeStopHelp(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
-	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>]")
+	_, _ = fmt.Fprintln(w, "  notify stop [--name <name>] [--command <id>]")
 	_, _ = fmt.Fprintln(w, "")
-	_, _ = fmt.Fprintln(w, "If --name is omitted and exactly one instance is running, that instance is used.")
+	_, _ = fmt.Fprintln(w, "Options:")
+	_, _ = fmt.Fprintln(w, "  --name <name>      target a specific instance; optional if exactly one instance is running")
+	_, _ = fmt.Fprintln(w, "  --command <id>     stop just one pending command instead of the entire instance")
 }
 
 func writeListHelp(w io.Writer) {

@@ -86,7 +86,7 @@ func TestProtocolRoundTrip(t *testing.T) {
 	buf.Reset()
 	response, err := makeSuccessResponse(7, instanceStatus{
 		Name:            "demo",
-		PendingCommands: []pendingCommandStatus{{Command: "printf hi", Recursive: true}},
+		PendingCommands: []pendingCommandStatus{{ID: 1, Command: "printf hi", Recursive: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestProtocolRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(decodedResp.Result, &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Name != "demo" || len(status.PendingCommands) != 1 || status.PendingCommands[0].Command != "printf hi" || !status.PendingCommands[0].Recursive {
+	if status.Name != "demo" || len(status.PendingCommands) != 1 || status.PendingCommands[0].ID != 1 || status.PendingCommands[0].Command != "printf hi" || !status.PendingCommands[0].Recursive {
 		t.Fatalf("decoded status mismatch: %#v", status)
 	}
 }
@@ -305,11 +305,48 @@ func TestListShowsPendingCommandsPerInstance(t *testing.T) {
 	if !strings.Contains(out, name+"\n") {
 		t.Fatalf("expected list output to contain instance %q, got %q", name, out)
 	}
-	if !strings.Contains(out, "  - sleep 2; printf done\n") {
-		t.Fatalf("expected list output to contain non-recursive pending command, got %q", out)
+	if !strings.Contains(out, "  - [1] sleep 2; printf done\n") {
+		t.Fatalf("expected list output to contain non-recursive pending command with id, got %q", out)
 	}
-	if !strings.Contains(out, "  - sleep 2; exit 1 (recursive)\n") {
-		t.Fatalf("expected list output to contain recursive pending command, got %q", out)
+	if !strings.Contains(out, "  - [2] sleep 2; exit 1 (recursive)\n") {
+		t.Fatalf("expected list output to contain recursive pending command with id, got %q", out)
+	}
+}
+
+func TestStopSpecificPendingCommand(t *testing.T) {
+	stderr := &lockedBuffer{}
+	name := uniqueName("stop-command")
+	stopServer := startTestServer(t, name, "cat >/dev/null", false, stderr)
+	defer stopServer()
+
+	if err := executeCLI([]string{"command", "--name", name, "sleep 10; printf first"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := executeCLI([]string{"command", "--name", name, "sleep 10; printf second"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForPendingCommands(t, name, 2)
+
+	if err := executeCLI([]string{"stop", "--name", name, "--command", "1"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForPendingCommandIDs(t, name, []uint64{2})
+	if _, err := queryInstanceStatus(name); err != nil {
+		t.Fatalf("expected instance %q to still be running: %v", name, err)
+	}
+}
+
+func TestStopSpecificPendingCommandFailsWhenMissing(t *testing.T) {
+	stderr := &lockedBuffer{}
+	name := uniqueName("stop-missing")
+	stopServer := startTestServer(t, name, "cat >/dev/null", false, stderr)
+	defer stopServer()
+
+	err := executeCLI([]string{"stop", "--name", name, "--command", "99"}, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "pending command 99 not found") {
+		t.Fatalf("expected missing pending command error, got %v", err)
 	}
 }
 
@@ -464,6 +501,32 @@ func waitForPendingCommands(t *testing.T, name string, want int) {
 		t.Fatalf("failed reading status for %q: %v", name, err)
 	}
 	t.Fatalf("instance %q never reached %d pending commands; got %d", name, want, len(status.PendingCommands))
+}
+
+func waitForPendingCommandIDs(t *testing.T, name string, want []uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := queryInstanceStatus(name)
+		if err == nil && len(status.PendingCommands) == len(want) {
+			matches := true
+			for i, pending := range status.PendingCommands {
+				if pending.ID != want[i] {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	status, err := queryInstanceStatus(name)
+	if err != nil {
+		t.Fatalf("failed reading status for %q: %v", name, err)
+	}
+	t.Fatalf("instance %q never reached pending command ids %v; got %#v", name, want, status.PendingCommands)
 }
 
 func waitForPrintedName(t *testing.T, stdout *bytes.Buffer) string {

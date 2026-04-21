@@ -17,20 +17,21 @@ func sendNotification(name string, n notification) error {
 	return nil
 }
 
-func sendStop(name string) error {
-	_, err := callRPC(name, methodStop, struct{}{}, nil)
+func sendStop(name string, commandID uint64) error {
+	_, err := callRPC(name, methodStop, stopParams{CommandID: commandID}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send stop signal: %w", err)
 	}
 	return nil
 }
 
-func sendCommandRequest(name string, req commandRequest) error {
-	_, err := callRPC(name, methodCommand, commandParams{Command: req.command, Prefix: req.prefix, Recursive: req.recursive}, nil)
+func sendCommandRequest(name string, req commandRequest) (uint64, error) {
+	var ack commandResultAck
+	_, err := callRPC(name, methodCommand, commandParams{Command: req.command, Prefix: req.prefix, Recursive: req.recursive}, &ack)
 	if err != nil {
-		return fmt.Errorf("failed to send command request: %w", err)
+		return 0, fmt.Errorf("failed to send command request: %w", err)
 	}
-	return nil
+	return ack.ID, nil
 }
 
 func queryInstanceStatus(name string) (instanceStatus, error) {

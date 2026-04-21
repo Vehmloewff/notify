@@ -24,9 +24,11 @@ type commandRequest struct {
 	command   string
 	prefix    string
 	recursive bool
+	response  chan uint64
 }
 
 type pendingCommandStatus struct {
+	ID        uint64 `json:"id"`
 	Command   string `json:"command"`
 	Recursive bool   `json:"recursive"`
 }
@@ -66,11 +68,17 @@ type commandParams struct {
 	Recursive bool   `json:"recursive,omitempty"`
 }
 
+type stopParams struct {
+	CommandID uint64 `json:"commandId,omitempty"`
+}
+
 type stopResult struct{}
 
 type sendResult struct{}
 
-type commandResultAck struct{}
+type commandResultAck struct {
+	ID uint64 `json:"id"`
+}
 
 func writeJSONRPCRequest(w io.Writer, req rpcRequest) error {
 	if req.JSONRPC == "" {
@@ -144,4 +152,15 @@ func decodeCommandParams(raw json.RawMessage) (commandRequest, error) {
 		return commandRequest{}, fmt.Errorf("missing command")
 	}
 	return commandRequest{command: params.Command, prefix: params.Prefix, recursive: params.Recursive}, nil
+}
+
+func decodeStopParams(raw json.RawMessage) (stopParams, error) {
+	if len(raw) == 0 {
+		return stopParams{}, nil
+	}
+	var params stopParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return stopParams{}, err
+	}
+	return params, nil
 }

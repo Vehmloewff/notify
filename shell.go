@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os/exec"
@@ -14,29 +15,56 @@ type commandResult struct {
 	stderr   []byte
 	exitCode int
 	err      error
+	canceled bool
 }
 
 func runShellCapture(command string) commandResult {
+	return runShellCaptureContext(context.Background(), command)
+}
+
+func runShellCaptureContext(ctx context.Context, command string) commandResult {
 	cmd := exec.Command("sh", "-c", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	result := commandResult{
-		stdout: stdout.Bytes(),
-		stderr: stderr.Bytes(),
-		err:    err,
+	if err := cmd.Start(); err != nil {
+		return commandResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), err: err, exitCode: -1}
 	}
-	if err == nil {
+
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitErr:
+		result := commandResult{
+			stdout: stdout.Bytes(),
+			stderr: stderr.Bytes(),
+			err:    err,
+		}
+		if err == nil {
+			return result
+		}
+		var exitErr *exec.ExitError
+		if ok := errors.As(err, &exitErr); ok {
+			result.exitCode = exitErr.ExitCode()
+			return result
+		}
+		result.exitCode = -1
 		return result
+	case <-ctx.Done():
+		_ = terminateProcess(cmd)
+		<-waitErr
+		return commandResult{
+			stdout:   stdout.Bytes(),
+			stderr:   stderr.Bytes(),
+			err:      ctx.Err(),
+			exitCode: -1,
+			canceled: true,
+		}
 	}
-	var exitErr *exec.ExitError
-	if ok := errors.As(err, &exitErr); ok {
-		result.exitCode = exitErr.ExitCode()
-		return result
-	}
-	result.exitCode = -1
-	return result
 }
 
 func startShellCommand(command string, stdin []byte, stdout, stderr io.Writer) (*exec.Cmd, <-chan error, error) {
