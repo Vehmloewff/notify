@@ -1,0 +1,102 @@
+name: Build notify executables
+
+on:
+  release:
+    types:
+      - created
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build darwin amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-darwin-amd64 .
+          tar -C dist -czf dist/notify-darwin-amd64.tar.gz notify-darwin-amd64
+
+      - name: Build darwin arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-darwin-arm64 .
+          tar -C dist -czf dist/notify-darwin-arm64.tar.gz notify-darwin-arm64
+
+      - name: Build linux amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-linux-amd64 .
+          tar -C dist -czf dist/notify-linux-amd64.tar.gz notify-linux-amd64
+
+      - name: Build linux arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-linux-arm64 .
+          tar -C dist -czf dist/notify-linux-arm64.tar.gz notify-linux-arm64
+
+      - name: Build windows amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-windows-amd64.exe .
+          cd dist
+          zip notify-windows-amd64.zip notify-windows-amd64.exe
+
+      - name: Build windows arm64
+        env:
+          GOOS: windows
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o dist/notify-windows-arm64.exe .
+          cd dist
+          zip notify-windows-arm64.zip notify-windows-arm64.exe
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/notify-darwin-amd64.tar.gz
+            dist/notify-darwin-arm64.tar.gz
+            dist/notify-linux-amd64.tar.gz
+            dist/notify-linux-arm64.tar.gz
+            dist/notify-windows-amd64.zip
+            dist/notify-windows-arm64.zip
