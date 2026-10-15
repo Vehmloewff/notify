@@ -19,6 +19,7 @@
           ldflags = [ "-s" "-w" ];
 
           meta = {
+            license = pkgs.lib.licenses.mit;
             description = "Route text notifications into shell commands";
             mainProgram = "notify";
           };
